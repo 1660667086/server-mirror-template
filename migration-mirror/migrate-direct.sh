@@ -24,14 +24,14 @@ mkdir -p "$WORKDIR" "$STAGE_DIR"
 install_pkg() {
   if command -v apt >/dev/null 2>&1; then
     apt update
-    apt install -y curl git nano nginx mariadb-server aria2 python3 python3-pip
+    apt install -y curl git nano nginx mariadb-server aria2 python3 python3-pip python3-paramiko
     systemctl enable --now nginx mariadb
   elif command -v dnf >/dev/null 2>&1; then
-    dnf install -y curl git nano nginx mariadb-server aria2 python3 python3-pip
+    dnf install -y curl git nano nginx mariadb-server aria2 python3 python3-pip python3-paramiko || dnf install -y curl git nano nginx mariadb-server aria2 python3 python3-pip
     systemctl enable --now nginx mariadb
   elif command -v yum >/dev/null 2>&1; then
     yum install -y epel-release || true
-    yum install -y curl git nano nginx mariadb-server aria2 python3 python3-pip
+    yum install -y curl git nano nginx mariadb-server aria2 python3 python3-pip python3-paramiko || yum install -y curl git nano nginx mariadb-server aria2 python3 python3-pip
     systemctl enable --now nginx mariadb
   else
     echo "[!] 不支持的系统包管理器"
@@ -40,11 +40,11 @@ install_pkg() {
 }
 
 install_pkg
-python3 -m pip install --break-system-packages --quiet paramiko || python3 -m pip install --quiet paramiko
+python3 -c "import paramiko" 2>/dev/null || python3 -m pip install --break-system-packages -q paramiko || true
 
 PYTHON_SCRIPT="$WORKDIR/direct_fetch.py"
 cat > "$PYTHON_SCRIPT" <<'PY'
-import io, os, tarfile, posixpath, paramiko, sys
+import io, tarfile, posixpath, paramiko, sys, stat
 
 old_host = sys.argv[1]
 old_user = sys.argv[2]
@@ -64,10 +64,12 @@ def exists(path):
         return False
 
 def add_file(tf, remote_path, arcname):
+    st = sftp.stat(remote_path)
     with sftp.open(remote_path, 'rb') as f:
         data = f.read()
     ti = tarfile.TarInfo(name=arcname)
     ti.size = len(data)
+    ti.mode = st.st_mode & 0o777
     tf.addfile(ti, io.BytesIO(data))
 
 def add_tree(tf, remote_path, arcroot):
@@ -77,30 +79,21 @@ def add_tree(tf, remote_path, arcroot):
     while stack:
         rp, ap = stack.pop()
         st = sftp.stat(rp)
-        if str(st).startswith(''):  # no-op; keep pyflakes quiet
-            pass
-        try:
-            entries = sftp.listdir_attr(rp)
+        if stat.S_ISDIR(st.st_mode):
             ti = tarfile.TarInfo(name=ap)
             ti.type = tarfile.DIRTYPE
+            ti.mode = st.st_mode & 0o777
             tf.addfile(ti)
-            for ent in entries:
+            for ent in sftp.listdir_attr(rp):
                 child_rp = posixpath.join(rp, ent.filename)
                 child_ap = posixpath.join(ap, ent.filename)
-                # if directory bit set
-                if ent.st_mode & 0o40000:
-                    stack.append((child_rp, child_ap))
-                else:
-                    with sftp.open(child_rp, 'rb') as f:
-                        data = f.read()
-                    ti = tarfile.TarInfo(name=child_ap)
-                    ti.size = len(data)
-                    tf.addfile(ti, io.BytesIO(data))
-        except IOError:
+                stack.append((child_rp, child_ap))
+        else:
             with sftp.open(rp, 'rb') as f:
                 data = f.read()
             ti = tarfile.TarInfo(name=ap)
             ti.size = len(data)
+            ti.mode = st.st_mode & 0o777
             tf.addfile(ti, io.BytesIO(data))
 
 with tarfile.open(out_path, 'w:gz') as tf:
@@ -110,22 +103,20 @@ with tarfile.open(out_path, 'w:gz') as tf:
         add_file(tf, '/www/server/panel/vhost/nginx/cloudreve.local.conf', 'nginx/cloudreve.local.conf')
     if exists('/usr/lib/systemd/system/cloudreve.service'):
         add_file(tf, '/usr/lib/systemd/system/cloudreve.service', 'systemd/cloudreve.service')
-    # db dump
     stdin, stdout, stderr = client.exec_command("if mysql -Nse \"SHOW DATABASES LIKE 'cloudreve';\" 2>/dev/null | grep -q cloudreve; then mysqldump --single-transaction --quick cloudreve; fi", timeout=120)
     sql = stdout.read()
     if sql:
         ti = tarfile.TarInfo(name='db/cloudreve.sql')
         ti.size = len(sql)
+        ti.mode = 0o600
         tf.addfile(ti, io.BytesIO(sql))
 
 client.close()
 PY
 
 python3 "$PYTHON_SCRIPT" "$OLD_HOST" "$OLD_USER" "$OLD_PASSWORD" "$EXPORT_TGZ"
-
 echo "[+] 已从旧服务器抓取迁移包: $EXPORT_TGZ"
 
-mkdir -p "$STAGE_DIR"
 rm -rf "$STAGE_DIR"/*
 tar -C "$STAGE_DIR" -xzf "$EXPORT_TGZ"
 
@@ -140,7 +131,10 @@ if [[ -d "$STAGE_DIR/aria2/conf" ]]; then
   cp -a "$STAGE_DIR/aria2/conf" /usr/local/lighthouse/softwares/aria2/conf
 fi
 
+chmod +x /usr/local/lighthouse/softwares/cloudreve/cloudreve 2>/dev/null || true
+
 mkdir -p /etc/nginx/conf.d
+rm -f /etc/nginx/sites-enabled/default /etc/nginx/sites-available/default 2>/dev/null || true
 cat > /etc/nginx/conf.d/cloudreve-migrated.conf <<'EOF'
 server {
     listen 80 default_server;
@@ -185,15 +179,44 @@ WantedBy=multi-user.target
 EOF
 fi
 
+mysql -uroot <<'EOF'
+CREATE DATABASE IF NOT EXISTS cloudreve CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE USER IF NOT EXISTS 'cloudreve'@'localhost' IDENTIFIED BY '-Ypu7cR.5M98';
+CREATE USER IF NOT EXISTS 'cloudreve'@'127.0.0.1' IDENTIFIED BY '-Ypu7cR.5M98';
+ALTER USER 'cloudreve'@'localhost' IDENTIFIED BY '-Ypu7cR.5M98';
+ALTER USER 'cloudreve'@'127.0.0.1' IDENTIFIED BY '-Ypu7cR.5M98';
+GRANT ALL PRIVILEGES ON cloudreve.* TO 'cloudreve'@'localhost';
+GRANT ALL PRIVILEGES ON cloudreve.* TO 'cloudreve'@'127.0.0.1';
+FLUSH PRIVILEGES;
+EOF
+
 if [[ -f "$STAGE_DIR/db/cloudreve.sql" ]]; then
-  mysql -uroot -e "CREATE DATABASE IF NOT EXISTS cloudreve CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
   mysql -uroot cloudreve < "$STAGE_DIR/db/cloudreve.sql" || true
 fi
 
 systemctl daemon-reload
-systemctl enable --now aria2 || true
+if [[ -f /usr/local/lighthouse/softwares/aria2/conf/aria2.conf ]]; then
+  cat > /etc/systemd/system/aria2.service <<'EOF'
+[Unit]
+Description=aria2
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/aria2c --conf-path=/usr/local/lighthouse/softwares/aria2/conf/aria2.conf
+Restart=on-failure
+RestartSec=2s
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload
+  systemctl enable --now aria2 || true
+fi
 systemctl enable --now cloudreve || true
 nginx -t && systemctl reload nginx || true
+systemctl restart cloudreve || true
 
 echo "[+] 新服务器直连旧服务器恢复完成"
-echo "[!] 后续仍需确认：域名、证书、数据库登录方式、Cloudreve外链设置。"
+echo "[+] 已自动处理：paramiko依赖、cloudreve执行权限、Debian默认nginx站点冲突、数据库账号权限、aria2 service。"
+echo "[!] 后续仍需确认：域名、证书、Cloudreve外链设置。"
