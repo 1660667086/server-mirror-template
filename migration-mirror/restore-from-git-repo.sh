@@ -6,10 +6,13 @@ BRANCH="${2:-main}"
 WORKDIR="/root/server-mirror-repo-restore"
 ARCHIVE_PATH="/root/server-mirror-export.tar.gz"
 SCRIPT_BASE_URL="${SCRIPT_BASE_URL:-https://raw.githubusercontent.com/1660667086/server-mirror-template/main/migration-mirror}"
+DEPLOY_KEY_PATH="${DEPLOY_KEY_PATH:-}"
 
 usage() {
   echo "用法: GITHUB_TOKEN=token bash restore-from-git-repo.sh <backup_repo> [branch]"
+  echo "或:   DEPLOY_KEY_PATH=/root/.ssh/server-mirror-backup-deploy bash restore-from-git-repo.sh <backup_repo> [branch]"
   echo "示例: GITHUB_TOKEN=token bash restore-from-git-repo.sh yourname/server-mirror-backup main"
+  echo "示例: DEPLOY_KEY_PATH=/root/.ssh/server-mirror-backup-deploy bash restore-from-git-repo.sh yourname/server-mirror-backup main"
 }
 
 require_cmd() {
@@ -48,10 +51,25 @@ require_cmd python3
 require_cmd sha256sum
 
 rm -rf "$WORKDIR"
-if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+
+if [[ -n "$DEPLOY_KEY_PATH" ]]; then
+  if [[ ! -f "$DEPLOY_KEY_PATH" ]]; then
+    echo "[!] 找不到 deploy key: $DEPLOY_KEY_PATH"
+    exit 1
+  fi
+  echo "[+] 使用 deploy key 通过 SSH 拉取仓库"
+  GIT_SSH_COMMAND="ssh -i $DEPLOY_KEY_PATH -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null" \
+    git clone --depth=1 --branch "$BRANCH" "git@github.com:${BACKUP_REPO}.git" "$WORKDIR"
+elif [[ -n "${GITHUB_TOKEN:-}" ]]; then
+  echo "[+] 使用 GITHUB_TOKEN 通过 HTTPS 拉取仓库"
   git clone --depth=1 --branch "$BRANCH" "https://x-access-token:${GITHUB_TOKEN}@github.com/${BACKUP_REPO}.git" "$WORKDIR"
+elif [[ -f /root/.ssh/server-mirror-backup-deploy ]]; then
+  echo "[+] 检测到默认 deploy key，使用 SSH 拉取仓库"
+  GIT_SSH_COMMAND="ssh -i /root/.ssh/server-mirror-backup-deploy -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null" \
+    git clone --depth=1 --branch "$BRANCH" "git@github.com:${BACKUP_REPO}.git" "$WORKDIR"
 else
-  git clone --depth=1 --branch "$BRANCH" "https://github.com/${BACKUP_REPO}.git" "$WORKDIR"
+  echo "[!] 未提供 GITHUB_TOKEN，也未提供 DEPLOY_KEY_PATH"
+  exit 1
 fi
 
 MANIFEST_PATH=""
