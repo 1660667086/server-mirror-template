@@ -40,6 +40,70 @@ EOF
   systemctl daemon-reload
 }
 
+ensure_trojan_services() {
+  local trojan_bin=""
+  local trojan_ctl=""
+
+  if [[ -x /usr/bin/trojan/trojan ]]; then
+    trojan_bin=/usr/bin/trojan/trojan
+  elif [[ -x /usr/local/bin/trojan ]]; then
+    trojan_bin=/usr/local/bin/trojan
+  fi
+
+  if [[ -x /usr/local/bin/trojan ]]; then
+    trojan_ctl=/usr/local/bin/trojan
+  elif [[ -n "$trojan_bin" ]]; then
+    trojan_ctl="$trojan_bin"
+  fi
+
+  if [[ -n "$trojan_bin" && -f /usr/local/etc/trojan/config.json && ! -f /etc/systemd/system/trojan.service ]]; then
+    cat > /etc/systemd/system/trojan.service <<EOF
+[Unit]
+Description=trojan
+After=network.target network-online.target nss-lookup.target mysql.service mariadb.service mysqld.service
+
+[Service]
+Type=simple
+StandardError=journal
+ExecStart=${trojan_bin} -config /usr/local/etc/trojan/config.json
+ExecReload=/bin/kill -HUP \$MAINPID
+Restart=on-failure
+RestartSec=3s
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  fi
+
+  if [[ -n "$trojan_ctl" && ! -f /etc/systemd/system/trojan-web.service ]]; then
+    cat > /etc/systemd/system/trojan-web.service <<EOF
+[Unit]
+Description=trojan-web
+After=network.target network-online.target nss-lookup.target mysql.service mariadb.service mysqld.service docker.service
+
+[Service]
+Type=simple
+StandardError=journal
+ExecStart=${trojan_ctl} web
+ExecReload=/bin/kill -HUP \$MAINPID
+Restart=on-failure
+RestartSec=3s
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  fi
+
+  systemctl daemon-reload
+}
+
+enable_if_unit_exists() {
+  local unit="$1"
+  if systemctl list-unit-files 2>/dev/null | awk '{print $1}' | grep -qx "$unit"; then
+    systemctl enable --now "${unit%.service}" || true
+  fi
+}
+
 if [[ ! -f "$ARCHIVE_PATH" ]]; then
   echo "[!] 找不到迁移包: $ARCHIVE_PATH"
   exit 1
@@ -129,6 +193,12 @@ WantedBy=multi-user.target
 EOF
 fi
 
+echo "[+] 恢复 trojan 文件"
+if [[ -d "$RESTORE_DIR/trojan/fs" ]]; then
+  (cd "$RESTORE_DIR/trojan/fs" && tar -cf - .) | tar -xf - -C /
+fi
+chmod +x /usr/local/bin/trojan /usr/bin/trojan/trojan 2>/dev/null || true
+
 if [[ -f "$RESTORE_DIR/db/cloudreve.sql" ]]; then
   echo "[+] 导入 cloudreve 数据库"
   mysql -uroot -e "CREATE DATABASE IF NOT EXISTS cloudreve CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
@@ -138,9 +208,12 @@ else
 fi
 
 ensure_aria2_service
+ensure_trojan_services
 systemctl daemon-reload
-systemctl enable --now aria2 || true
-systemctl enable --now cloudreve || true
+enable_if_unit_exists aria2.service
+enable_if_unit_exists trojan.service
+enable_if_unit_exists trojan-web.service
+enable_if_unit_exists cloudreve.service
 nginx -t && systemctl reload nginx || true
 
 echo "[+] 迁移恢复完成"
