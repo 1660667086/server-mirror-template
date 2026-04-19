@@ -7,6 +7,8 @@ WORKDIR="/root/server-mirror-repo-restore"
 ARCHIVE_PATH="/root/server-mirror-export.tar.gz"
 SCRIPT_BASE_URL="${SCRIPT_BASE_URL:-https://raw.githubusercontent.com/1660667086/server-mirror-template/main/migration-mirror}"
 DEPLOY_KEY_PATH="${DEPLOY_KEY_PATH:-}"
+PKG_MANAGER=""
+PKG_UPDATE_DONE=0
 
 usage() {
   echo "用法: GITHUB_TOKEN=token bash restore-from-git-repo.sh <backup_repo> [branch]"
@@ -15,10 +17,82 @@ usage() {
   echo "示例: DEPLOY_KEY_PATH=/root/.ssh/server-mirror-backup-deploy bash restore-from-git-repo.sh yourname/server-mirror-backup main"
 }
 
-require_cmd() {
+detect_pkg_manager() {
+  if command -v apt-get >/dev/null 2>&1; then
+    PKG_MANAGER="apt-get"
+  elif command -v dnf >/dev/null 2>&1; then
+    PKG_MANAGER="dnf"
+  elif command -v yum >/dev/null 2>&1; then
+    PKG_MANAGER="yum"
+  elif command -v apk >/dev/null 2>&1; then
+    PKG_MANAGER="apk"
+  else
+    PKG_MANAGER=""
+  fi
+}
+
+run_as_root() {
+  if [[ "$(id -u)" -eq 0 ]]; then
+    "$@"
+  elif command -v sudo >/dev/null 2>&1; then
+    sudo "$@"
+  else
+    echo "[!] 需要 root 或 sudo 权限来自动安装依赖"
+    exit 1
+  fi
+}
+
+install_packages() {
+  local packages=("$@")
+
+  if [[ ${#packages[@]} -eq 0 ]]; then
+    return 0
+  fi
+
+  detect_pkg_manager
+  if [[ -z "$PKG_MANAGER" ]]; then
+    echo "[!] 无法识别包管理器，请先手动安装: ${packages[*]}"
+    exit 1
+  fi
+
+  case "$PKG_MANAGER" in
+    apt-get)
+      if [[ "$PKG_UPDATE_DONE" -eq 0 ]]; then
+        run_as_root apt-get update
+        PKG_UPDATE_DONE=1
+      fi
+      run_as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y "${packages[@]}"
+      ;;
+    dnf)
+      run_as_root dnf install -y "${packages[@]}"
+      ;;
+    yum)
+      run_as_root yum install -y "${packages[@]}"
+      ;;
+    apk)
+      run_as_root apk add --no-cache "${packages[@]}"
+      ;;
+  esac
+}
+
+ensure_cmd() {
   local cmd="$1"
+  shift || true
+  local packages=("$@")
+
+  if command -v "$cmd" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if [[ ${#packages[@]} -eq 0 ]]; then
+    packages=("$cmd")
+  fi
+
+  echo "[+] 缺少命令 $cmd，尝试自动安装: ${packages[*]}"
+  install_packages "${packages[@]}"
+
   if ! command -v "$cmd" >/dev/null 2>&1; then
-    echo "[!] 缺少命令: $cmd"
+    echo "[!] 自动安装后仍缺少命令: $cmd"
     exit 1
   fi
 }
@@ -44,11 +118,11 @@ if [[ -z "$BACKUP_REPO" ]]; then
   exit 1
 fi
 
-require_cmd bash
-require_cmd curl
-require_cmd git
-require_cmd python3
-require_cmd sha256sum
+ensure_cmd bash bash
+ensure_cmd curl curl
+ensure_cmd git git
+ensure_cmd python3 python3
+ensure_cmd sha256sum coreutils
 
 rm -rf "$WORKDIR"
 
@@ -93,7 +167,7 @@ else
     echo "[+] 从 Git 仓库重组原始迁移包分片"
     printf '%s\n' "$RAW_PARTS" | xargs cat > "$ARCHIVE_PATH"
   elif [[ -n "$B64_PARTS" ]]; then
-    require_cmd base64
+    ensure_cmd base64 coreutils
     echo "[+] 从 Git 仓库重组 Base64 迁移包分片"
     printf '%s\n' "$B64_PARTS" | xargs cat | base64 -d > "$ARCHIVE_PATH"
   else
