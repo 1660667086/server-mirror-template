@@ -2,6 +2,47 @@
 
 目标：尽量少改配置，把旧服务器上的 Cloudreve / Nginx / aria2 结构迁到新服务器。
 
+## 仓库直拉方案
+
+如果你要的是“旧服务器把东西直接推到 Git 仓库里，新服务器再直接从仓库拉取”，请用这套流程。
+
+适用场景：
+
+- 备份体积不大，或者你接受 Git 仓库存放切片后的迁移包
+- 你明确希望新服务器通过 `git clone` / `git pull` 获取备份
+
+注意：
+
+- 备份仓库必须是 private
+- GitHub 单文件限制是 100MB，所以脚本会自动把迁移包切成多个 `part` 文件
+- 如果 `uploads` 很大，这种方式会让仓库越来越重，不适合长期高频备份
+
+### 旧服务器推送到备份仓库
+
+```bash
+export GITHUB_TOKEN='你的token'
+bash <(curl -fsSL https://raw.githubusercontent.com/1660667086/server-mirror-template/main/migration-mirror/publish-to-git-repo.sh) yourname/server-mirror-backup main
+```
+
+这一步会：
+
+1. 调用 `export-old-server.sh` 导出迁移包
+2. 自动按 90MB 分片
+3. 把分片和清单直接 commit/push 到备份仓库
+
+### 新服务器从备份仓库直接拉取并恢复
+
+```bash
+export GITHUB_TOKEN='你的token'
+bash <(curl -fsSL https://raw.githubusercontent.com/1660667086/server-mirror-template/main/migration-mirror/restore-from-git-repo.sh) yourname/server-mirror-backup main
+```
+
+这一步会：
+
+1. `git clone` 备份仓库
+2. 自动重组迁移包并校验 SHA256
+3. 调用 `import-to-new-server.sh` 恢复目录、数据库和服务
+
 ## 纯 GitHub 中转方案
 
 如果你不想让新服务器直连旧服务器，而是要让新服务器只从 GitHub 拉取，请用这套流程。
