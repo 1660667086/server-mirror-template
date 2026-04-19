@@ -4,6 +4,42 @@ set -euo pipefail
 ARCHIVE_PATH="${1:-/root/server-mirror-export.tar.gz}"
 RESTORE_DIR=/root/server-mirror-restore
 
+ensure_aria2_service() {
+  local unit_path=""
+
+  if systemctl list-unit-files 2>/dev/null | awk '{print $1}' | grep -qx 'aria2.service'; then
+    return 0
+  fi
+
+  if [[ -f /etc/systemd/system/aria2.service ]]; then
+    unit_path=/etc/systemd/system/aria2.service
+  elif [[ -f /usr/lib/systemd/system/aria2.service ]]; then
+    unit_path=/usr/lib/systemd/system/aria2.service
+  elif [[ -f /lib/systemd/system/aria2.service ]]; then
+    unit_path=/lib/systemd/system/aria2.service
+  else
+    unit_path=/etc/systemd/system/aria2.service
+    mkdir -p /usr/local/lighthouse/softwares/aria2/conf
+    mkdir -p /usr/local/lighthouse/softwares/aria2/downloads
+    cat > "$unit_path" <<'EOF'
+[Unit]
+Description=Aria2c Download Manager
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/aria2c --conf-path=/usr/local/lighthouse/softwares/aria2/conf/aria2.conf
+Restart=on-failure
+RestartSec=2s
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  fi
+
+  systemctl daemon-reload
+}
+
 if [[ ! -f "$ARCHIVE_PATH" ]]; then
   echo "[!] 找不到迁移包: $ARCHIVE_PATH"
   exit 1
@@ -42,6 +78,7 @@ if [[ -d "$RESTORE_DIR/aria2/conf" ]]; then
   rm -rf /usr/local/lighthouse/softwares/aria2/conf
   cp -a "$RESTORE_DIR/aria2/conf" /usr/local/lighthouse/softwares/aria2/conf
 fi
+mkdir -p /usr/local/lighthouse/softwares/aria2/downloads
 
 echo "[+] 恢复 Nginx 配置（按通用 Nginx 路径落地）"
 mkdir -p /etc/nginx/conf.d
@@ -100,6 +137,7 @@ else
   echo "[!] 未发现 SQL 备份，跳过数据库导入"
 fi
 
+ensure_aria2_service
 systemctl daemon-reload
 systemctl enable --now aria2 || true
 systemctl enable --now cloudreve || true
