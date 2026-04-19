@@ -124,7 +124,6 @@ if [[ -n "$TROJAN_CONFIG_PATH" && -f "$TROJAN_CONFIG_PATH" ]]; then
 fi
 
 copy_abs_if_exists /usr/local/bin/trojan "$STAGE_DIR/trojan/fs"
-copy_abs_if_exists /usr/bin/trojan "$STAGE_DIR/trojan/fs"
 
 if mysql -Nse "SHOW DATABASES LIKE 'cloudreve';" 2>/dev/null | grep -q cloudreve; then
   echo "[+] 导出 cloudreve 数据库"
