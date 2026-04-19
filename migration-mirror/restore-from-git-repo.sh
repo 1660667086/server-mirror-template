@@ -54,29 +54,49 @@ else
   git clone --depth=1 --branch "$BRANCH" "https://github.com/${BACKUP_REPO}.git" "$WORKDIR"
 fi
 
-if [[ ! -f "$WORKDIR/snapshot/MANIFEST.txt" ]]; then
-  echo "[!] 未找到快照清单文件: $WORKDIR/snapshot/MANIFEST.txt"
-  exit 1
+MANIFEST_PATH=""
+if [[ -f "$WORKDIR/snapshot/MANIFEST.txt" ]]; then
+  MANIFEST_PATH="$WORKDIR/snapshot/MANIFEST.txt"
+elif [[ -f "$WORKDIR/MANIFEST.txt" ]]; then
+  MANIFEST_PATH="$WORKDIR/MANIFEST.txt"
 fi
 
-PART_COUNT="$(find "$WORKDIR/snapshot" -type f -name 'server-mirror-export.tar.gz.part.*' | wc -l | tr -d ' ')"
-if [[ "$PART_COUNT" == "0" ]]; then
-  echo "[!] 未找到迁移包分片"
-  exit 1
-fi
+if [[ -f "$WORKDIR/server-mirror-export.tar.gz" ]]; then
+  echo "[+] 使用仓库根目录中的迁移包"
+  cp -f "$WORKDIR/server-mirror-export.tar.gz" "$ARCHIVE_PATH"
+elif [[ -f "$WORKDIR/snapshot/server-mirror-export.tar.gz" ]]; then
+  echo "[+] 使用 snapshot 目录中的迁移包"
+  cp -f "$WORKDIR/snapshot/server-mirror-export.tar.gz" "$ARCHIVE_PATH"
+else
+  RAW_PARTS="$(find "$WORKDIR" -maxdepth 2 -type f -name 'server-mirror-export.tar.gz.part.*' | LC_ALL=C sort)"
+  B64_PARTS="$(find "$WORKDIR" -maxdepth 2 -type f -name 'server-mirror-export.tar.gz.part.*.b64' | LC_ALL=C sort)"
 
-echo "[+] 从 Git 仓库重组迁移包"
-find "$WORKDIR/snapshot" -type f -name 'server-mirror-export.tar.gz.part.*' | LC_ALL=C sort | xargs cat > "$ARCHIVE_PATH"
-
-EXPECTED_SHA256="$(awk -F= '/^archive_sha256=/{print $2}' "$WORKDIR/snapshot/MANIFEST.txt")"
-if [[ -n "$EXPECTED_SHA256" ]]; then
-  ACTUAL_SHA256="$(sha256sum "$ARCHIVE_PATH" | awk '{print $1}')"
-  if [[ "$ACTUAL_SHA256" != "$EXPECTED_SHA256" ]]; then
-    echo "[!] 迁移包校验失败"
-    echo "[!] expected: $EXPECTED_SHA256"
-    echo "[!] actual:   $ACTUAL_SHA256"
+  if [[ -n "$RAW_PARTS" ]]; then
+    echo "[+] 从 Git 仓库重组原始迁移包分片"
+    printf '%s\n' "$RAW_PARTS" | xargs cat > "$ARCHIVE_PATH"
+  elif [[ -n "$B64_PARTS" ]]; then
+    require_cmd base64
+    echo "[+] 从 Git 仓库重组 Base64 迁移包分片"
+    printf '%s\n' "$B64_PARTS" | xargs cat | base64 -d > "$ARCHIVE_PATH"
+  else
+    echo "[!] 未找到迁移包或迁移包分片"
     exit 1
   fi
+fi
+
+if [[ -n "$MANIFEST_PATH" ]]; then
+  EXPECTED_SHA256="$(awk -F= '/^archive_sha256=/{print $2}' "$MANIFEST_PATH")"
+  if [[ -n "$EXPECTED_SHA256" ]]; then
+    ACTUAL_SHA256="$(sha256sum "$ARCHIVE_PATH" | awk '{print $1}')"
+    if [[ "$ACTUAL_SHA256" != "$EXPECTED_SHA256" ]]; then
+      echo "[!] 迁移包校验失败"
+      echo "[!] expected: $EXPECTED_SHA256"
+      echo "[!] actual:   $ACTUAL_SHA256"
+      exit 1
+    fi
+  fi
+else
+  echo "[!] 未找到 MANIFEST.txt，跳过 SHA256 校验"
 fi
 
 IMPORT_HELPER="$(fetch_helper)"
