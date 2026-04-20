@@ -97,6 +97,127 @@ EOF
   systemctl daemon-reload
 }
 
+parse_ini_value() {
+  local file="$1"
+  local section="$2"
+  local key="$3"
+
+  awk -F= -v target_section="$section" -v target_key="$key" '
+    $0 ~ "^\\[" target_section "\\]$" {
+      in_section=1
+      next
+    }
+    /^\[/ {
+      in_section=0
+    }
+    in_section {
+      line=$0
+      sub(/^[[:space:]]+/, "", line)
+      sub(/[[:space:]]+$/, "", line)
+      if (line ~ "^" target_key "[[:space:]]*=") {
+        sub("^[^=]*=[[:space:]]*", "", line)
+        sub(/[[:space:]]+$/, "", line)
+        print line
+        exit
+      }
+    }
+  ' "$file"
+}
+
+sql_escape_string() {
+  printf '%s' "$1" | sed "s/'/''/g"
+}
+
+ensure_cloudreve_db_user() {
+  local conf_file=/usr/local/lighthouse/softwares/cloudreve/conf.ini
+  local db_type=""
+  local db_host=""
+  local db_name=""
+  local db_user=""
+  local db_password=""
+  local escaped_db_name=""
+  local escaped_db_user=""
+  local escaped_db_password=""
+
+  if [[ ! -f "$conf_file" ]]; then
+    return 0
+  fi
+
+  db_type="$(parse_ini_value "$conf_file" Database Type)"
+  db_host="$(parse_ini_value "$conf_file" Database Host)"
+  db_name="$(parse_ini_value "$conf_file" Database Name)"
+  db_user="$(parse_ini_value "$conf_file" Database User)"
+  db_password="$(parse_ini_value "$conf_file" Database Password)"
+
+  if [[ "$db_type" != "mysql" || -z "$db_name" || -z "$db_user" ]]; then
+    return 0
+  fi
+
+  case "$db_host" in
+    ""|"127.0.0.1"|"localhost")
+      ;;
+    *)
+      echo "[!] Cloudreve 使用远程数据库 $db_host，跳过本地数据库用户创建"
+      return 0
+      ;;
+  esac
+
+  escaped_db_name="$(sql_escape_string "$db_name")"
+  escaped_db_user="$(sql_escape_string "$db_user")"
+  escaped_db_password="$(sql_escape_string "$db_password")"
+
+  mysql -uroot <<SQL
+CREATE DATABASE IF NOT EXISTS \`${escaped_db_name}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE USER IF NOT EXISTS '${escaped_db_user}'@'localhost' IDENTIFIED BY '${escaped_db_password}';
+CREATE USER IF NOT EXISTS '${escaped_db_user}'@'127.0.0.1' IDENTIFIED BY '${escaped_db_password}';
+ALTER USER '${escaped_db_user}'@'localhost' IDENTIFIED BY '${escaped_db_password}';
+ALTER USER '${escaped_db_user}'@'127.0.0.1' IDENTIFIED BY '${escaped_db_password}';
+GRANT ALL PRIVILEGES ON \`${escaped_db_name}\`.* TO '${escaped_db_user}'@'localhost';
+GRANT ALL PRIVILEGES ON \`${escaped_db_name}\`.* TO '${escaped_db_user}'@'127.0.0.1';
+FLUSH PRIVILEGES;
+SQL
+}
+
+write_cloudreve_nginx_conf() {
+  local target="$1"
+
+  cat > "$target" <<'EOF'
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name _;
+
+    client_max_body_size 0;
+
+    location / {
+        proxy_pass http://127.0.0.1:5212;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header REMOTE-HOST $remote_addr;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+
+    location ~ /\.well-known {
+        allow all;
+    }
+}
+EOF
+}
+
+disable_default_nginx_site() {
+  if [[ -L /etc/nginx/sites-enabled/default || -f /etc/nginx/sites-enabled/default ]]; then
+    rm -f /etc/nginx/sites-enabled/default
+  fi
+
+  if [[ -f /etc/nginx/conf.d/default.conf ]]; then
+    mv -f /etc/nginx/conf.d/default.conf /etc/nginx/conf.d/default.conf.disabled-by-server-mirror
+  fi
+}
+
 enable_if_unit_exists() {
   local unit="$1"
   if systemctl list-unit-files 2>/dev/null | awk '{print $1}' | grep -qx "$unit"; then
@@ -144,30 +265,13 @@ if [[ -d "$RESTORE_DIR/aria2/conf" ]]; then
 fi
 mkdir -p /usr/local/lighthouse/softwares/aria2/downloads
 
-echo "[+] 恢复 Nginx 配置（按通用 Nginx 路径落地）"
+echo "[+] 恢复 Nginx 配置（生成通用 Cloudreve 反代站点）"
 mkdir -p /etc/nginx/conf.d
 if [[ -f "$RESTORE_DIR/nginx/cloudreve.local.conf" ]]; then
-  cat > /etc/nginx/conf.d/cloudreve-migrated.conf <<'EOF'
-server {
-    listen 80 default_server;
-    server_name _;
-    root /usr/local/lighthouse/softwares/cloudreve;
-
-    location / {
-        proxy_pass http://127.0.0.1:5212;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header REMOTE-HOST $remote_addr;
-        client_max_body_size 0;
-    }
-
-    location ~ \.well-known {
-        allow all;
-    }
-}
-EOF
+  cp -f "$RESTORE_DIR/nginx/cloudreve.local.conf" /root/server-mirror-restored-cloudreve.local.conf
 fi
+write_cloudreve_nginx_conf /etc/nginx/conf.d/cloudreve-migrated.conf
+disable_default_nginx_site
 
 echo "[+] 恢复 Cloudreve systemd 服务"
 if [[ -f "$RESTORE_DIR/systemd/cloudreve.service" ]]; then
@@ -207,6 +311,7 @@ else
   echo "[!] 未发现 SQL 备份，跳过数据库导入"
 fi
 
+ensure_cloudreve_db_user
 ensure_aria2_service
 ensure_trojan_services
 systemctl daemon-reload
