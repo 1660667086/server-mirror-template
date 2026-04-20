@@ -160,7 +160,7 @@ elif [[ -f "$WORKDIR/snapshot/server-mirror-export.tar.gz" ]]; then
   echo "[+] 使用 snapshot 目录中的迁移包"
   cp -f "$WORKDIR/snapshot/server-mirror-export.tar.gz" "$ARCHIVE_PATH"
 else
-  RAW_PARTS="$(find "$WORKDIR" -maxdepth 2 -type f -name 'server-mirror-export.tar.gz.part.*' | LC_ALL=C sort)"
+  RAW_PARTS="$(find "$WORKDIR" -maxdepth 2 -type f -name 'server-mirror-export.tar.gz.part.*' ! -name '*.b64' | LC_ALL=C sort)"
   B64_PARTS="$(find "$WORKDIR" -maxdepth 2 -type f -name 'server-mirror-export.tar.gz.part.*.b64' | LC_ALL=C sort)"
 
   if [[ -n "$RAW_PARTS" ]]; then
