@@ -218,6 +218,13 @@ disable_default_nginx_site() {
   fi
 }
 
+normalize_directory_permissions() {
+  local target="$1"
+  if [[ -d "$target" ]]; then
+    find "$target" -type d -exec chmod 755 {} +
+  fi
+}
+
 enable_if_unit_exists() {
   local unit="$1"
   if systemctl list-unit-files 2>/dev/null | awk '{print $1}' | grep -qx "$unit"; then
@@ -256,6 +263,8 @@ if [[ -d "$RESTORE_DIR/cloudreve/cloudreve" ]]; then
   rm -rf /usr/local/lighthouse/softwares/cloudreve
   cp -a "$RESTORE_DIR/cloudreve/cloudreve" /usr/local/lighthouse/softwares/cloudreve
 fi
+normalize_directory_permissions /usr/local/lighthouse/softwares/cloudreve
+chmod +x /usr/local/lighthouse/softwares/cloudreve/cloudreve 2>/dev/null || true
 
 echo "[+] 恢复 aria2 配置"
 mkdir -p /usr/local/lighthouse/softwares/aria2
@@ -263,6 +272,7 @@ if [[ -d "$RESTORE_DIR/aria2/conf" ]]; then
   rm -rf /usr/local/lighthouse/softwares/aria2/conf
   cp -a "$RESTORE_DIR/aria2/conf" /usr/local/lighthouse/softwares/aria2/conf
 fi
+normalize_directory_permissions /usr/local/lighthouse/softwares/aria2
 mkdir -p /usr/local/lighthouse/softwares/aria2/downloads
 
 echo "[+] 恢复 Nginx 配置（生成通用 Cloudreve 反代站点）"
@@ -319,6 +329,7 @@ enable_if_unit_exists aria2.service
 enable_if_unit_exists trojan.service
 enable_if_unit_exists trojan-web.service
 enable_if_unit_exists cloudreve.service
+systemctl restart cloudreve || true
 nginx -t && systemctl reload nginx || true
 
 echo "[+] 迁移恢复完成"
