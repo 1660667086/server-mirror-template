@@ -238,12 +238,8 @@ ensure_cloudreve_db_user() {
 
   mysql -uroot <<SQL
 CREATE DATABASE IF NOT EXISTS \`${escaped_db_name}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-CREATE USER IF NOT EXISTS '${escaped_db_user}'@'localhost' IDENTIFIED BY '${escaped_db_password}';
-CREATE USER IF NOT EXISTS '${escaped_db_user}'@'127.0.0.1' IDENTIFIED BY '${escaped_db_password}';
-ALTER USER '${escaped_db_user}'@'localhost' IDENTIFIED BY '${escaped_db_password}';
-ALTER USER '${escaped_db_user}'@'127.0.0.1' IDENTIFIED BY '${escaped_db_password}';
-GRANT ALL PRIVILEGES ON \`${escaped_db_name}\`.* TO '${escaped_db_user}'@'localhost';
-GRANT ALL PRIVILEGES ON \`${escaped_db_name}\`.* TO '${escaped_db_user}'@'127.0.0.1';
+GRANT ALL PRIVILEGES ON \`${escaped_db_name}\`.* TO '${escaped_db_user}'@'localhost' IDENTIFIED BY '${escaped_db_password}';
+GRANT ALL PRIVILEGES ON \`${escaped_db_name}\`.* TO '${escaped_db_user}'@'127.0.0.1' IDENTIFIED BY '${escaped_db_password}';
 FLUSH PRIVILEGES;
 SQL
 }
