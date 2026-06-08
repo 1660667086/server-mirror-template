@@ -4,6 +4,73 @@ set -euo pipefail
 ARCHIVE_PATH="${1:-/root/server-mirror-export.tar.gz}"
 RESTORE_DIR=/root/server-mirror-restore
 
+ensure_low_memory_swap() {
+  local mem_total_kb=""
+  local swap_total_kb=""
+  local swap_mb=""
+
+  if [[ ! -r /proc/meminfo ]]; then
+    return 0
+  fi
+
+  mem_total_kb="$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)"
+  swap_total_kb="$(awk '/^SwapTotal:/ {print $2}' /proc/meminfo)"
+
+  if [[ -z "$mem_total_kb" || -z "$swap_total_kb" ]]; then
+    return 0
+  fi
+
+  if (( swap_total_kb > 0 )); then
+    return 0
+  fi
+
+  if (( mem_total_kb <= 1200000 )); then
+    swap_mb=2048
+  elif (( mem_total_kb <= 2000000 )); then
+    swap_mb=1024
+  else
+    return 0
+  fi
+
+  echo "[+] 检测到小内存机器，自动创建 ${swap_mb}MB swap"
+
+  if [[ ! -f /swapfile ]]; then
+    if command -v fallocate >/dev/null 2>&1; then
+      fallocate -l "${swap_mb}M" /swapfile || dd if=/dev/zero of=/swapfile bs=1M count="$swap_mb" status=progress
+    else
+      dd if=/dev/zero of=/swapfile bs=1M count="$swap_mb" status=progress
+    fi
+  fi
+
+  chmod 600 /swapfile
+  mkswap /swapfile >/dev/null
+  swapon /swapfile
+
+  if ! grep -qE '^[[:space:]]*/swapfile[[:space:]]' /etc/fstab; then
+    echo '/swapfile none swap sw 0 0' >> /etc/fstab
+  fi
+}
+
+install_runtime_packages() {
+  if command -v apt-get >/dev/null 2>&1; then
+    export DEBIAN_FRONTEND=noninteractive
+    export NEEDRESTART_MODE=a
+    apt-get update
+    apt-get install -y nginx mariadb-server aria2 curl
+    systemctl enable --now nginx mariadb
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y nginx mariadb-server aria2 curl
+    systemctl enable --now nginx mariadb
+  elif command -v yum >/dev/null 2>&1; then
+    yum install -y epel-release || true
+    yum install -y nginx mariadb-server aria2 curl
+    systemctl enable --now nginx mariadb
+  else
+    echo "[!] 不支持的系统包管理器"
+    exit 1
+  fi
+}
+
 ensure_aria2_service() {
   local unit_path=""
 
@@ -241,21 +308,8 @@ mkdir -p "$RESTORE_DIR"
 rm -rf "$RESTORE_DIR"/*
 tar -C "$RESTORE_DIR" -xzf "$ARCHIVE_PATH"
 
-if command -v apt >/dev/null 2>&1; then
-  apt update
-  apt install -y nginx mariadb-server aria2 curl
-  systemctl enable --now nginx mariadb
-elif command -v dnf >/dev/null 2>&1; then
-  dnf install -y nginx mariadb-server aria2 curl
-  systemctl enable --now nginx mariadb
-elif command -v yum >/dev/null 2>&1; then
-  yum install -y epel-release || true
-  yum install -y nginx mariadb-server aria2 curl
-  systemctl enable --now nginx mariadb
-else
-  echo "[!] 不支持的系统包管理器"
-  exit 1
-fi
+ensure_low_memory_swap
+install_runtime_packages
 
 echo "[+] 恢复 Cloudreve 目录"
 mkdir -p /usr/local/lighthouse/softwares
