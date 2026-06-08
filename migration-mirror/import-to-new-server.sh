@@ -55,6 +55,9 @@ install_runtime_packages() {
   if command -v apt-get >/dev/null 2>&1; then
     export DEBIAN_FRONTEND=noninteractive
     export NEEDRESTART_MODE=a
+    dpkg --configure -a || true
+    apt-get -f install -y || true
+    dpkg --configure -a
     apt-get update
     apt-get install -y nginx mariadb-server aria2 curl
     systemctl enable --now nginx mariadb
